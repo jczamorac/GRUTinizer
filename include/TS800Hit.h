@@ -154,6 +154,9 @@ class TCrdc : public TDetectorHit {
     int GetMaxPad() const;
     int GetMaxPadSum() const;
 
+    std::vector<float> GetCRDC() const  ;
+    float GetDispersiveXFit() const;
+
     virtual void Copy(TObject&) const;
     virtual void Print(Option_t *opt="") const;
     virtual void Clear(Option_t *opt="");

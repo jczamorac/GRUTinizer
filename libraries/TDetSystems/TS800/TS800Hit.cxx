@@ -8,6 +8,12 @@
 #include "TF1.h"
 #include "TVirtualFitter.h"
 
+
+#include "lmcurve.h"
+#include "lmfit.h"
+#include "lmmin.h"
+
+
 TTrigger::TTrigger() {
   Clear();
 }
@@ -572,6 +578,192 @@ bool TCrdc::IsGoodSample(int i) const {
   }
   return false;
 }
+
+
+
+//-----------------------------------
+std::vector<float>  TCrdc::GetCRDC() const   {
+
+        std::vector<float> PadCRDC(224);            
+
+        for(int i=0; i<224; i++){
+                int pad_num ;
+                float pad_ch ; 
+                 
+                if(i<Size()){
+                        if(!IsGoodSample(i)) continue;
+                        pad_num = channel.at(i);
+                        pad_ch = data.at(i);                          
+                        if(pad_ch>=0)  PadCRDC.at(pad_num) += pad_ch;       
+                }
+        }
+
+        
+        return PadCRDC;
+}
+
+
+float TCrdc::GetDispersiveXFit() const{
+  
+ std::vector<float> elcrdc = GetCRDC() ;
+
+//---------
+  // Cluster search
+  Bool_t flg_clstr = kFALSE;
+  Int_t  iclstr = -1;
+  const int NUM_PADS = 224;
+  const Int_t maxclstr = NUM_PADS; // maximum number of clusters (I know this is too many...)
+  Int_t clstr[maxclstr][3];
+  Float_t maxchgClust[maxclstr];
+  Float_t maxpadClust[maxclstr];
+  const Float_t qmax = 500.; // MINUMUM value of max charge to be considered to form a cluster
+  Float_t tmp_qmax = 0.0;
+  Int_t gclstr = 0;
+  
+
+
+  for (UShort_t i = 0; i < NUM_PADS; i++) {
+    if ((flg_clstr == kFALSE) && (elcrdc.at(i)>0) ) {
+      flg_clstr = kTRUE;
+      iclstr = iclstr + 1;
+      clstr[iclstr][0] =  i; // leading edge
+      clstr[iclstr][1] = -1; // trailing edge (tentative)
+      maxchgClust[iclstr] = elcrdc.at(i);
+    } else if ((flg_clstr == kTRUE) && (elcrdc.at(i)>0) ) {
+      if (elcrdc.at(i) > maxchgClust[iclstr]) {
+	maxchgClust[iclstr] = elcrdc.at(i);
+	maxpadClust[iclstr] = i;
+      }
+    } else if ((flg_clstr == kTRUE) && (elcrdc.at(i)==0) ) {
+      flg_clstr = kFALSE;
+      clstr[iclstr][1] = i - 1;
+      clstr[iclstr][2] = i - clstr[iclstr][0];
+      ////accept only clusters with charge larger than qmax and a width larger than 3 channels 
+      if ( (maxchgClust[iclstr] < qmax)  || (clstr[iclstr][2] < 4) ) { 
+	iclstr = iclstr - 1;
+      }
+    }
+  }
+
+
+  // if a cluster is located at the end of the cathode
+  if (flg_clstr == kTRUE) {
+    clstr[iclstr][1] = NUM_PADS - 1;
+    clstr[iclstr][2] = NUM_PADS - clstr[iclstr][0];
+  }
+
+  if (iclstr == 0) {
+    gclstr = 0;
+  } else if (iclstr > 0) {
+    tmp_qmax = maxchgClust[0];
+    // look for the GOOD cluster (gclstr) to be used to the analysis 
+    // (the cluster with the max charge is used)
+    for (Int_t i = 0; i < iclstr + 1; i++) {
+      if ((maxchgClust[i] > tmp_qmax)    ) { 
+	tmp_qmax = maxchgClust[i];
+	gclstr = i;
+      }
+    }
+  } else {
+    return sqrt(-1.0);
+  }
+
+int maxpad = maxpadClust[gclstr];
+
+  if (maxpad ==-1){
+    return sqrt(-1);
+  }
+
+  float x_slope = sqrt(-1);
+  float x_offset = sqrt(-1);
+  if(fId==0) {
+    x_slope = GValue::Value("CRDC1_X_SLOPE");
+    x_offset = GValue::Value("CRDC1_X_OFFSET");
+  } else if(fId==1) {
+    x_slope = GValue::Value("CRDC2_X_SLOPE");
+    x_offset = GValue::Value("CRDC2_X_OFFSET");
+  }
+  if(std::isnan(x_slope))
+    x_slope = 1.0;
+  if(std::isnan(x_offset))
+    x_offset = 0.0;
+  
+  std::map<int,double> datamap;
+  const int GRAVITY_WIDTH = 14;//determines how many pads one uses in averaging
+  int lowpad = maxpad - GRAVITY_WIDTH/2;
+  int highpad = lowpad + GRAVITY_WIDTH;
+  if (lowpad < 0){
+    lowpad = 0;
+  }
+  if (highpad >= NUM_PADS){
+    highpad = NUM_PADS-1;
+  }
+
+  double datasum = 0;
+  double weighted_sum = 0;
+  double weighted_sum_2 = 0;
+  double xpad[NUM_PADS];
+  double qcal[NUM_PADS];
+  int j = 0;
+
+  for(int i=0;i<Size();i++) {
+
+    if((channel.at(i) < lowpad)||(channel.at(i)>highpad) ||
+       !IsGoodSample(i)) {
+      continue;
+    }
+    
+    TChannel *c = TChannel::GetChannel(Address(i));
+    double cal_data;
+    if (c){
+      cal_data = c->CalEnergy(GetData(i));
+    }
+    else{
+      cal_data = (double)GetData(i);
+    }
+     
+    datasum += cal_data;
+    weighted_sum += channel.at(i)*cal_data;
+    weighted_sum_2 += channel.at(i) * channel.at(i) * cal_data;
+
+    //for fitting
+    xpad[j] = (double)channel.at(i);
+    qcal[j] = (double)cal_data;
+    j++;
+
+  }
+
+  // + 0.5 so that we take the middle of the pad, not the left edge.
+  //this is xcog--the center of gravity calculation
+  double mean_chan = weighted_sum/datasum + 0.5;
+
+   
+////-------Fitting
+  double sigma = (double)TMath::Sqrt(weighted_sum_2/datasum - (weighted_sum/datasum)*(weighted_sum/datasum));
+
+  double xfit = 0.0;
+  double par[3];
+  int npar = 3;
+
+  lm_status_struct status;
+  lm_control_struct control = lm_control_double;
+  control.printflags = 0;
+
+  //beginning guess
+  par[0] = maxchgClust[gclstr];
+  par[1] = mean_chan;
+  par[2] = sigma;
+
+  lmcurve_fit( npar, par, j, xpad, qcal, sechs, &control, &status );
+
+  xfit = par[1];
+
+
+    return (xfit*x_slope+x_offset);
+    
+}
+//-----------------------------------
+
 
 float TCrdc::GetDispersiveX() const{
   int maxpad = GetMaxPad();
